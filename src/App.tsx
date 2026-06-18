@@ -5,9 +5,11 @@ import {
   CheckCircle2,
   CircleGauge,
   Clock3,
+  Moon,
   Radio,
   ScanFace,
   ShieldAlert,
+  Sun,
   Video,
   Volume2,
   Wifi,
@@ -51,10 +53,12 @@ type ServerDecision = {
   ear?: number;
   earSmooth?: number;
   status?: string;
+  yawnConfidence?: number;
 };
 
 const DROWSINESS_WS_URL =
   import.meta.env.VITE_DROWSINESS_WS_URL ?? "wss://spoti.ingyuc.click/ws/keypoints";
+const YAWN_WS_URL = import.meta.env.VITE_YAWN_WS_URL ?? "wss://spoti.ingyuc.click/ws/yawn";
 const MEDIAPIPE_WASM_URL =
   import.meta.env.VITE_MEDIAPIPE_WASM_URL ?? "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.21/wasm";
 const FACE_LANDMARKER_MODEL_URL =
@@ -145,7 +149,7 @@ function normalizeLevel(value: unknown, risk: number, isDrowsy: boolean): AlertL
       return "danger";
     }
 
-    if (["warning", "warn", "caution", "주의"].includes(normalized)) {
+    if (["warning", "warn", "caution", "yawn", "yawning", "주의", "하품"].includes(normalized)) {
       return "warning";
     }
 
@@ -169,8 +173,16 @@ function isClosedEyeStatus(status?: string) {
   return status === "CLOSED" || status === "CLOSE";
 }
 
+function isYawningStatus(status?: string) {
+  return status === "YAWN" || status === "YAWNING";
+}
+
 function calculateStatusRisk(status: string | undefined, ear: number | undefined, earSmooth: number | undefined): number {
   const earValue = earSmooth ?? ear;
+
+  if (isYawningStatus(status)) {
+    return 55;
+  }
 
   if (status === "OPEN") {
     if (earValue === undefined) {
@@ -199,12 +211,19 @@ function parseServerDecision(raw: unknown): ServerDecision | null {
   }
 
   const data = raw as Record<string, unknown>;
-  const status = typeof data.status === "string" ? data.status.toUpperCase() : undefined;
+  const statusValue = data.yawning === true ? "YAWNING" : data.status ?? data.state ?? data.label ?? data.event ?? data.class;
+  const status = typeof statusValue === "string" ? statusValue.toUpperCase() : undefined;
   const ear = typeof data.ear === "number" ? data.ear : undefined;
   const earSmooth = typeof data.ear_smooth === "number" ? data.ear_smooth : undefined;
+  const yawnConfidence = typeof data.yawn_confidence === "number" ? data.yawn_confidence : undefined;
   const isClosed = isClosedEyeStatus(status);
+  const isYawning = isYawningStatus(status);
   const risk = clampRisk(
-    data.risk ?? data.score ?? data.probability ?? data.drowsiness_score ?? calculateStatusRisk(status, ear, earSmooth)
+    data.risk ??
+      data.score ??
+      data.probability ??
+      data.drowsiness_score ??
+      (isYawning && yawnConfidence !== undefined ? yawnConfidence : calculateStatusRisk(status, ear, earSmooth))
   );
   const isDrowsy = Boolean(
     data.is_drowsy ??
@@ -219,6 +238,8 @@ function parseServerDecision(raw: unknown): ServerDecision | null {
     ? "눈 뜸 상태"
     : isClosed
       ? "위웅위웅! 눈 감김 감지"
+      : isYawning
+        ? "하품 감지"
       : status
         ? `눈 상태 ${status}`
         : level === "normal"
@@ -229,10 +250,11 @@ function parseServerDecision(raw: unknown): ServerDecision | null {
     isDrowsy: isDrowsy || level !== "normal",
     level,
     risk,
-    message: String(data.message ?? data.reason ?? data.label ?? fallbackMessage),
+    message: String(data.message ?? data.reason ?? (isYawning ? fallbackMessage : data.label) ?? fallbackMessage),
     ear,
     earSmooth,
-    status
+    status,
+    yawnConfidence
   };
 }
 
@@ -347,6 +369,70 @@ function useDrowsinessSocket(onDecision: (decision: ServerDecision) => void) {
   }, []);
 
   return { connectionStatus, sendEyePayload, wsUrl };
+}
+
+function useYawnSocket(onDecision: (decision: ServerDecision) => void) {
+  const socketRef = useRef<WebSocket | null>(null);
+  const reconnectTimerRef = useRef<number | null>(null);
+  const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>("connecting");
+  const wsUrl = useMemo(() => normalizeWsUrl(YAWN_WS_URL), []);
+
+  useEffect(() => {
+    let isClosedByEffect = false;
+
+    function connect() {
+      setConnectionStatus("connecting");
+
+      const socket = new WebSocket(wsUrl);
+      socketRef.current = socket;
+
+      socket.onopen = () => {
+        setConnectionStatus("connected");
+      };
+
+      socket.onmessage = (event) => {
+        try {
+          const parsed = JSON.parse(String(event.data));
+          const decision = parseServerDecision(parsed);
+
+          if (decision?.status && isYawningStatus(decision.status)) {
+            onDecision({
+              ...decision,
+              level: "warning",
+              message: decision.message || "하품 감지"
+            });
+          }
+        } catch {
+          setConnectionStatus("error");
+        }
+      };
+
+      socket.onerror = () => {
+        setConnectionStatus("error");
+      };
+
+      socket.onclose = () => {
+        if (isClosedByEffect) {
+          return;
+        }
+
+        setConnectionStatus("disconnected");
+        reconnectTimerRef.current = window.setTimeout(connect, 2500);
+      };
+    }
+
+    connect();
+
+    return () => {
+      isClosedByEffect = true;
+      if (reconnectTimerRef.current) {
+        window.clearTimeout(reconnectTimerRef.current);
+      }
+      socketRef.current?.close();
+    };
+  }, [onDecision, wsUrl]);
+
+  return { connectionStatus, wsUrl };
 }
 
 function useEyeLandmarks(
@@ -530,8 +616,27 @@ function useSirenAlarm(active: boolean) {
   }, [active, playPulse]);
 }
 
+function useThemeMode() {
+  const [isDarkMode, setIsDarkMode] = useState(() => {
+    if (typeof window === "undefined") {
+      return false;
+    }
+
+    return window.localStorage.getItem("lightbox-theme") === "dark";
+  });
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = isDarkMode ? "dark" : "light";
+    window.localStorage.setItem("lightbox-theme", isDarkMode ? "dark" : "light");
+  }, [isDarkMode]);
+
+  return { isDarkMode, setIsDarkMode };
+}
+
 function App() {
   const { videoRef, cameraStatus } = useCameraPreview();
+  const { isDarkMode, setIsDarkMode } = useThemeMode();
+  const showDiagnostics = import.meta.env.DEV;
   const lastAlertAtRef = useRef(0);
   const [events, setEvents] = useState<DetectionEvent[]>([]);
   const [frequency, setFrequency] = useState<FrequencyPoint[]>(emptyFrequency);
@@ -582,6 +687,7 @@ function App() {
   }, []);
 
   const { connectionStatus, sendEyePayload, wsUrl } = useDrowsinessSocket(handleDecision);
+  const { connectionStatus: yawnConnectionStatus, wsUrl: yawnWsUrl } = useYawnSocket(handleDecision);
   const { mediapipeStatus, eyePreview } = useEyeLandmarks(videoRef, sendEyePayload);
 
   const totalEvents = frequency.reduce((sum, point) => sum + point.count, 0);
@@ -614,9 +720,20 @@ function App() {
           <p className="eyebrow">LightBox Driver Monitor</p>
           <h1>졸음운전 감지 대시보드</h1>
         </div>
-        <div className={`status-pill ${currentLevel}`}>
-          <Radio size={18} />
-          <span>{levelText[currentLevel]}</span>
+        <div className="top-actions">
+          <button
+            className="theme-toggle"
+            type="button"
+            onClick={() => setIsDarkMode((current) => !current)}
+            aria-label={isDarkMode ? "라이트 모드로 전환" : "다크 모드로 전환"}
+            title={isDarkMode ? "라이트 모드" : "다크 모드"}
+          >
+            {isDarkMode ? <Sun size={18} /> : <Moon size={18} />}
+          </button>
+          <div className={`status-pill ${currentLevel}`}>
+            <Radio size={18} />
+            <span>{levelText[currentLevel]}</span>
+          </div>
         </div>
       </section>
 
@@ -624,20 +741,30 @@ function App() {
         <MetricCard icon={<CircleGauge />} label="현재 위험도" value={`${currentRisk}%`} tone={currentLevel} />
         <MetricCard icon={<Bell />} label="감지 이벤트" value={`${totalEvents}회`} tone="neutral" />
         <MetricCard icon={<Clock3 />} label="평균 빈도" value={`${averageFrequency}회/구간`} tone="neutral" />
-        <MetricCard icon={<Camera />} label="카메라 상태" value={cameraStatus} tone="neutral" />
-        <MetricCard
-          icon={connectionStatus === "connected" ? <Wifi /> : <WifiOff />}
-          label="WebSocket"
-          value={connectionText[connectionStatus]}
-          tone={connectionStatus === "connected" ? "normal" : connectionStatus === "error" ? "danger" : "neutral"}
-        />
-        <MetricCard icon={<ScanFace />} label="눈 포인트" value={mediapipeStatus} tone="neutral" />
         <MetricCard
           icon={<CircleGauge />}
           label="EAR"
           value={currentDecision.earSmooth?.toFixed(3) ?? currentDecision.ear?.toFixed(3) ?? "-"}
           tone="neutral"
         />
+        {showDiagnostics && (
+          <>
+            <MetricCard icon={<Camera />} label="카메라 상태" value={cameraStatus} tone="neutral" />
+            <MetricCard
+              icon={connectionStatus === "connected" ? <Wifi /> : <WifiOff />}
+              label="WebSocket"
+              value={connectionText[connectionStatus]}
+              tone={connectionStatus === "connected" ? "normal" : connectionStatus === "error" ? "danger" : "neutral"}
+            />
+            <MetricCard
+              icon={yawnConnectionStatus === "connected" ? <Wifi /> : <WifiOff />}
+              label="하품 소켓"
+              value={connectionText[yawnConnectionStatus]}
+              tone={yawnConnectionStatus === "connected" ? "normal" : yawnConnectionStatus === "error" ? "danger" : "neutral"}
+            />
+            <MetricCard icon={<ScanFace />} label="눈 포인트" value={mediapipeStatus} tone="neutral" />
+          </>
+        )}
       </section>
 
       <section className="content-grid">
@@ -710,20 +837,26 @@ function App() {
         <FrequencyChart data={frequency} />
       </section>
 
-      <section className="payload-panel" aria-label="서버 송신 정보">
-        <div>
-          <p className="eyebrow">Server Endpoint</p>
-          <strong>{wsUrl}</strong>
-        </div>
-        <div>
-          <p className="eyebrow">Eye Points</p>
-          <strong>좌/우 눈 각 6포인트 · {eyePreview ? "송신 중" : "얼굴 대기 중"}</strong>
-        </div>
-        <div>
-          <p className="eyebrow">Server Status</p>
-          <strong>{currentDecision.status ?? "WAITING"}</strong>
-        </div>
-      </section>
+      {showDiagnostics && (
+        <section className="payload-panel" aria-label="서버 송신 정보">
+          <div>
+            <p className="eyebrow">Server Endpoint</p>
+            <strong>{wsUrl}</strong>
+          </div>
+          <div>
+            <p className="eyebrow">Yawn Endpoint</p>
+            <strong>{yawnWsUrl}</strong>
+          </div>
+          <div>
+            <p className="eyebrow">Eye Points</p>
+            <strong>좌/우 눈 각 6포인트 · {eyePreview ? "송신 중" : "얼굴 대기 중"}</strong>
+          </div>
+          <div>
+            <p className="eyebrow">Server Status</p>
+            <strong>{currentDecision.status ?? "WAITING"}</strong>
+          </div>
+        </section>
+      )}
 
       {isClosedAlert && (
         <div className="closed-alarm" role="alert" aria-live="assertive">
