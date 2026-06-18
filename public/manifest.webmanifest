@@ -1,0 +1,19 @@
+{
+  "name": "LightBox 졸음 감지 대시보드",
+  "short_name": "LightBox",
+  "description": "운전자 졸음 상태를 실시간으로 확인하는 웹앱",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#eef3f1",
+  "theme_color": "#0f766e",
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
