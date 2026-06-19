@@ -15,6 +15,7 @@ import {
 import { FaceLandmarker, FilesetResolver } from "@mediapipe/tasks-vision";
 import type { ReactNode, RefObject } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import logoUrl from "../logo.png";
 
 type AlertLevel = "normal" | "warning" | "danger";
 type ConnectionStatus = "connecting" | "connected" | "disconnected" | "error";
@@ -34,6 +35,7 @@ type DetectionEvent = {
   label: string;
   level: AlertLevel;
   risk: number;
+  status?: string;
 };
 
 type FrequencyPoint = {
@@ -73,11 +75,6 @@ const CLOSED_RISK_BASE = 90;
 const CLOSED_EAR_REFERENCE = 0.22;
 const CLOSED_EAR_MIN = 0.12;
 
-const emptyFrequency: FrequencyPoint[] = Array.from({ length: 10 }, (_, index) => ({
-  label: `-${9 - index}`,
-  count: 0
-}));
-
 const levelText: Record<AlertLevel, string> = {
   normal: "정상",
   warning: "주의",
@@ -108,6 +105,19 @@ function formatMinute(date: Date) {
     minute: "2-digit",
     hour12: false
   }).format(date);
+}
+
+function createEmptyFrequency(now = new Date()): FrequencyPoint[] {
+  return Array.from({ length: 10 }, (_, index) => {
+    const date = new Date(now);
+    date.setSeconds(0, 0);
+    date.setMinutes(date.getMinutes() - (9 - index));
+
+    return {
+      label: formatMinute(date),
+      count: 0
+    };
+  });
 }
 
 function clampRisk(value: unknown) {
@@ -708,6 +718,64 @@ function useSirenAlarm(active: boolean) {
   }, [active, playPulse]);
 }
 
+function useYawnChime(triggerId: number | null) {
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const lastPlayedIdRef = useRef<number | null>(null);
+
+  const playChime = useCallback(() => {
+    try {
+      const audioWindow = window as Window & typeof globalThis & { webkitAudioContext?: typeof AudioContext };
+      const AudioContextCtor = window.AudioContext ?? audioWindow.webkitAudioContext;
+
+      if (!AudioContextCtor) {
+        return;
+      }
+
+      const context = audioContextRef.current ?? new AudioContextCtor();
+      audioContextRef.current = context;
+
+      if (context.state === "suspended") {
+        context.resume().catch(() => undefined);
+      }
+
+      const now = context.currentTime;
+      const masterGain = context.createGain();
+      const firstTone = context.createOscillator();
+      const secondTone = context.createOscillator();
+
+      firstTone.type = "sine";
+      secondTone.type = "sine";
+      firstTone.frequency.setValueAtTime(660, now);
+      secondTone.frequency.setValueAtTime(880, now + 0.16);
+
+      masterGain.gain.setValueAtTime(0.0001, now);
+      masterGain.gain.exponentialRampToValueAtTime(0.075, now + 0.04);
+      masterGain.gain.exponentialRampToValueAtTime(0.025, now + 0.18);
+      masterGain.gain.exponentialRampToValueAtTime(0.085, now + 0.22);
+      masterGain.gain.exponentialRampToValueAtTime(0.0001, now + 0.58);
+
+      firstTone.connect(masterGain);
+      secondTone.connect(masterGain);
+      masterGain.connect(context.destination);
+      firstTone.start(now);
+      firstTone.stop(now + 0.2);
+      secondTone.start(now + 0.17);
+      secondTone.stop(now + 0.6);
+    } catch {
+      // Browsers may block audio until the page receives a user gesture.
+    }
+  }, []);
+
+  useEffect(() => {
+    if (triggerId === null || lastPlayedIdRef.current === triggerId) {
+      return;
+    }
+
+    lastPlayedIdRef.current = triggerId;
+    playChime();
+  }, [playChime, triggerId]);
+}
+
 function useThemeMode() {
   const [isDarkMode, setIsDarkMode] = useState(() => {
     if (typeof window === "undefined") {
@@ -743,7 +811,7 @@ function App() {
 
     return window.localStorage.getItem("lightbox-chart") !== "collapsed";
   });
-  const [frequency, setFrequency] = useState<FrequencyPoint[]>(emptyFrequency);
+  const [frequency, setFrequency] = useState<FrequencyPoint[]>(() => createEmptyFrequency());
   const [toast, setToast] = useState<DetectionEvent | null>(null);
   const [currentDecision, setCurrentDecision] = useState<ServerDecision>({
     isDrowsy: false,
@@ -770,7 +838,8 @@ function App() {
       id: now,
       label: decision.message,
       level: decision.level,
-      risk: decision.risk
+      risk: decision.risk,
+      status: decision.status
     };
 
     setToast(event);
@@ -796,7 +865,9 @@ function App() {
   const currentLevel = currentDecision.level;
   const currentRisk = currentDecision.risk;
   const isClosedAlert = isClosedEyeStatus(currentDecision.status);
+  const yawnChimeTriggerId = toast?.status && isYawningStatus(toast.status) ? toast.id : null;
   useSirenAlarm(isClosedAlert);
+  useYawnChime(yawnChimeTriggerId);
 
   const averageFrequency = useMemo(() => {
     if (frequency.length === 0) {
@@ -823,12 +894,34 @@ function App() {
     window.localStorage.setItem("lightbox-chart", isChartOpen ? "expanded" : "collapsed");
   }, [isChartOpen]);
 
+  useEffect(() => {
+    const updateFrequencyWindow = () => {
+      setFrequency((current) => {
+        const next = createEmptyFrequency();
+
+        return next.map((point) => ({
+          ...point,
+          count: current.find((currentPoint) => currentPoint.label === point.label)?.count ?? 0
+        }));
+      });
+    };
+
+    const interval = window.setInterval(updateFrequencyWindow, 15000);
+    updateFrequencyWindow();
+
+    return () => window.clearInterval(interval);
+  }, []);
+
+  const isCompactDashboard = !isSummaryOpen && !isChartOpen;
+
   return (
-    <main className="dashboard">
+    <main className={`dashboard ${isCompactDashboard ? "compact-dashboard" : ""}`}>
       <section className="topbar" aria-label="대시보드 요약">
-        <div>
-          <p className="eyebrow">LightBox Driver Monitor</p>
-          <h1>졸음운전 감지 대시보드</h1>
+        <div className="brand-heading">
+          <h1>
+            <img src={logoUrl} alt="" aria-hidden="true" />
+            <span>LightBox</span>
+          </h1>
         </div>
         <div className="top-actions">
           <button
