@@ -25,9 +25,18 @@ type EyePoint = {
   y: number;
 };
 
-type EyePayload = {
+type EyeKeypoints = {
   leftEye: EyePoint[];
   rightEye: EyePoint[];
+};
+
+type DeviceType = "phone" | "mobile" | "laptop" | "desktop";
+
+type EyePayload = {
+  device: DeviceType;
+  browser: string;
+  userAgent: string;
+  keypoints: EyeKeypoints;
 };
 
 type DetectionEvent = {
@@ -97,6 +106,60 @@ function normalizeWsUrl(url: string) {
   }
 
   return url;
+}
+
+function getBrowserName(userAgent: string) {
+  if (/Edg\//.test(userAgent)) {
+    return "Edge";
+  }
+
+  if (/SamsungBrowser\//.test(userAgent)) {
+    return "Samsung Internet";
+  }
+
+  if (/CriOS\/|Chrome\//.test(userAgent) && !/Edg\//.test(userAgent)) {
+    return "Chrome";
+  }
+
+  if (/FxiOS\/|Firefox\//.test(userAgent)) {
+    return "Firefox";
+  }
+
+  if (/Safari\//.test(userAgent) && /Version\//.test(userAgent)) {
+    return "Safari";
+  }
+
+  return "Unknown";
+}
+
+function getDeviceType(userAgent: string): DeviceType {
+  const normalized = userAgent.toLowerCase();
+  const touchPoints = navigator.maxTouchPoints ?? 0;
+
+  if (/iphone|android.*mobile|mobile|phone|galaxy|pixel/.test(normalized)) {
+    return "phone";
+  }
+
+  if (/ipad|tablet|ios|android/.test(normalized) || (normalized.includes("macintosh") && touchPoints > 1)) {
+    return "mobile";
+  }
+
+  if (/macintosh|mac os|windows|linux/.test(normalized)) {
+    return "laptop";
+  }
+
+  return "desktop";
+}
+
+function createEyePayload(keypoints: EyeKeypoints): EyePayload {
+  const userAgent = navigator.userAgent;
+
+  return {
+    device: getDeviceType(userAgent),
+    browser: getBrowserName(userAgent),
+    userAgent,
+    keypoints
+  };
 }
 
 function formatMinute(date: Date) {
@@ -452,14 +515,14 @@ function useDrowsinessSocket(onDecision: (decision: ServerDecision) => void) {
     };
   }, [onDecision, wsUrl]);
 
-  const sendEyePayload = useCallback((payload: EyePayload) => {
+  const sendEyePayload = useCallback((keypoints: EyeKeypoints) => {
     const socket = socketRef.current;
 
     if (!socket || socket.readyState !== WebSocket.OPEN) {
       return false;
     }
 
-    socket.send(JSON.stringify(payload));
+    socket.send(JSON.stringify(createEyePayload(keypoints)));
     return true;
   }, []);
 
@@ -576,12 +639,12 @@ function useYawnSocket(
 
 function useEyeLandmarks(
   videoRef: RefObject<HTMLVideoElement | null>,
-  sendEyePayload: (payload: EyePayload) => boolean
+  sendEyePayload: (payload: EyeKeypoints) => boolean
 ) {
   const lastVideoTimeRef = useRef(-1);
   const lastSentAtRef = useRef(0);
   const [mediapipeStatus, setMediapipeStatus] = useState("눈 포인트 준비 중");
-  const [eyePreview, setEyePreview] = useState<EyePayload | null>(null);
+  const [eyePreview, setEyePreview] = useState<EyeKeypoints | null>(null);
 
   useEffect(() => {
     let landmarker: FaceLandmarker | null = null;
@@ -611,7 +674,7 @@ function useEyeLandmarks(
       }
     }
 
-    function extractEyePayload(video: HTMLVideoElement, now: number): EyePayload | null {
+    function extractEyePayload(video: HTMLVideoElement, now: number): EyeKeypoints | null {
       if (!landmarker || video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) {
         return null;
       }
