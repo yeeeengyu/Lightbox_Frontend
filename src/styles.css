@@ -190,7 +190,8 @@ h2 {
 
 .status-pill,
 .camera-badge,
-.chart-summary {
+.chart-summary,
+.socket-badge {
   display: inline-flex;
   align-items: center;
   gap: 8px;
@@ -202,6 +203,34 @@ h2 {
   color: var(--text);
   font-weight: 800;
   white-space: nowrap;
+}
+
+.socket-badge {
+  min-height: 34px;
+  padding: 0 11px;
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+
+.socket-badge strong {
+  color: var(--text);
+}
+
+.socket-badge.connected {
+  color: var(--normal-text);
+  background: var(--normal-bg);
+  border-color: var(--normal-border);
+}
+
+.socket-badge.error,
+.socket-badge.disconnected {
+  color: var(--danger-text);
+  background: var(--danger-bg);
+  border-color: var(--danger-border);
+}
+
+.socket-badge.connecting {
+  color: var(--muted);
 }
 
 .chart-actions {
@@ -740,6 +769,15 @@ h2 {
     min-height: 34px;
     padding: 0 10px;
     font-size: 0.82rem;
+  }
+
+  .socket-badge {
+    min-height: 34px;
+    padding: 0 9px;
+  }
+
+  .socket-badge strong {
+    display: none;
   }
 
   .summary-grid {

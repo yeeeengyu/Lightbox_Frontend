@@ -11,6 +11,8 @@ import {
   Sun,
   Video,
   Volume2,
+  Wifi,
+  WifiOff,
 } from "lucide-react";
 import { FaceLandmarker, FilesetResolver } from "@mediapipe/tasks-vision";
 import type { ReactNode, RefObject } from "react";
@@ -37,6 +39,8 @@ type EyePayload = {
   browser: string;
   userAgent: string;
   keypoints: EyeKeypoints;
+  leftEye: EyePoint[];
+  rightEye: EyePoint[];
 };
 
 type DetectionEvent = {
@@ -94,6 +98,13 @@ const levelDescription: Record<AlertLevel, string> = {
   normal: "운전자 상태가 안정적입니다.",
   warning: "졸음 징후가 감지되고 있습니다.",
   danger: "즉시 경고가 필요한 상태입니다."
+};
+
+const compactConnectionText: Record<ConnectionStatus, string> = {
+  connecting: "연결 중",
+  connected: "연결됨",
+  disconnected: "끊김",
+  error: "오류"
 };
 
 function normalizeWsUrl(url: string) {
@@ -158,8 +169,28 @@ function createEyePayload(keypoints: EyeKeypoints): EyePayload {
     device: getDeviceType(userAgent),
     browser: getBrowserName(userAgent),
     userAgent,
-    keypoints
+    keypoints,
+    leftEye: keypoints.leftEye,
+    rightEye: keypoints.rightEye
   };
+}
+
+function readNumber(...values: unknown[]) {
+  for (const value of values) {
+    if (typeof value === "number" && Number.isFinite(value)) {
+      return value;
+    }
+
+    if (typeof value === "string") {
+      const parsed = Number(value);
+
+      if (Number.isFinite(parsed)) {
+        return parsed;
+      }
+    }
+  }
+
+  return undefined;
 }
 
 function formatMinute(date: Date) {
@@ -370,8 +401,8 @@ function parseServerDecision(raw: unknown): ServerDecision | null {
       ? "YAWNING"
       : data.status ?? data.state ?? data.label ?? data.event ?? data.class;
   const status = typeof statusValue === "string" ? statusValue.toUpperCase() : undefined;
-  const ear = typeof data.ear === "number" ? data.ear : undefined;
-  const earSmooth = typeof data.ear_smooth === "number" ? data.ear_smooth : undefined;
+  const ear = readNumber(data.ear, data.ear_avg, data.earAverage, data.avg_ear, data.left_ear, data.ear_left, data.right_ear, data.ear_right);
+  const earSmooth = readNumber(data.ear_smooth, data.earSmooth, data.smooth_ear, data.ear_smoothed);
   const rawYawnConfidence = data.yawn_confidence ?? data.yawnConfidence ?? data.confidence ?? yawnDetection?.confidence;
   const yawnConfidence = typeof rawYawnConfidence === "number" ? rawYawnConfidence : undefined;
   const isClosed = isClosedEyeStatus(status);
@@ -964,8 +995,8 @@ function App() {
     });
   }, []);
 
-  const { sendEyePayload } = useDrowsinessSocket(handleDecision);
-  useYawnSocket(videoRef, handleDecision);
+  const { connectionStatus, sendEyePayload } = useDrowsinessSocket(handleDecision);
+  const { connectionStatus: yawnConnectionStatus } = useYawnSocket(videoRef, handleDecision);
   useEyeLandmarks(videoRef, sendEyePayload);
 
   const totalEvents = frequency.reduce((sum, point) => sum + point.count, 0);
@@ -1032,6 +1063,8 @@ function App() {
           </h1>
         </div>
         <div className="top-actions">
+          <SocketStatusBadge label="눈" status={connectionStatus} />
+          <SocketStatusBadge label="하품" status={yawnConnectionStatus} />
           <button
             className="summary-toggle"
             type="button"
@@ -1161,6 +1194,18 @@ function App() {
         </div>
       )}
     </main>
+  );
+}
+
+function SocketStatusBadge({ label, status }: { label: string; status: ConnectionStatus }) {
+  const isConnected = status === "connected";
+
+  return (
+    <span className={`socket-badge ${status}`} title={`${label} 소켓 ${compactConnectionText[status]}`}>
+      {isConnected ? <Wifi size={15} /> : <WifiOff size={15} />}
+      <span>{label}</span>
+      <strong>{compactConnectionText[status]}</strong>
+    </span>
   );
 }
 
