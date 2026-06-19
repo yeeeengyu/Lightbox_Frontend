@@ -120,6 +120,43 @@ function createEmptyFrequency(now = new Date()): FrequencyPoint[] {
   });
 }
 
+let sharedAudioContext: AudioContext | null = null;
+
+function getSharedAudioContext() {
+  const audioWindow = window as Window & typeof globalThis & { webkitAudioContext?: typeof AudioContext };
+  const AudioContextCtor = window.AudioContext ?? audioWindow.webkitAudioContext;
+
+  if (!AudioContextCtor) {
+    return null;
+  }
+
+  sharedAudioContext = sharedAudioContext ?? new AudioContextCtor();
+  return sharedAudioContext;
+}
+
+function unlockSharedAudio() {
+  const context = getSharedAudioContext();
+
+  if (!context) {
+    return;
+  }
+
+  if (context.state === "suspended") {
+    context.resume().catch(() => undefined);
+  }
+
+  const now = context.currentTime;
+  const gain = context.createGain();
+  const oscillator = context.createOscillator();
+
+  gain.gain.setValueAtTime(0.0001, now);
+  oscillator.frequency.setValueAtTime(440, now);
+  oscillator.connect(gain);
+  gain.connect(context.destination);
+  oscillator.start(now);
+  oscillator.stop(now + 0.03);
+}
+
 function clampRisk(value: unknown) {
   const numberValue = Number(value);
 
@@ -639,20 +676,15 @@ function useEyeLandmarks(
 }
 
 function useSirenAlarm(active: boolean) {
-  const audioContextRef = useRef<AudioContext | null>(null);
   const intervalRef = useRef<number | null>(null);
 
   const playPulse = useCallback(() => {
     try {
-      const audioWindow = window as Window & typeof globalThis & { webkitAudioContext?: typeof AudioContext };
-      const AudioContextCtor = window.AudioContext ?? audioWindow.webkitAudioContext;
+      const context = getSharedAudioContext();
 
-      if (!AudioContextCtor) {
+      if (!context) {
         return;
       }
-
-      const context = audioContextRef.current ?? new AudioContextCtor();
-      audioContextRef.current = context;
 
       if (context.state === "suspended") {
         context.resume().catch(() => undefined);
@@ -719,20 +751,15 @@ function useSirenAlarm(active: boolean) {
 }
 
 function useYawnChime(triggerId: number | null) {
-  const audioContextRef = useRef<AudioContext | null>(null);
   const lastPlayedIdRef = useRef<number | null>(null);
 
   const playChime = useCallback(() => {
     try {
-      const audioWindow = window as Window & typeof globalThis & { webkitAudioContext?: typeof AudioContext };
-      const AudioContextCtor = window.AudioContext ?? audioWindow.webkitAudioContext;
+      const context = getSharedAudioContext();
 
-      if (!AudioContextCtor) {
+      if (!context) {
         return;
       }
-
-      const context = audioContextRef.current ?? new AudioContextCtor();
-      audioContextRef.current = context;
 
       if (context.state === "suspended") {
         context.resume().catch(() => undefined);
@@ -774,6 +801,23 @@ function useYawnChime(triggerId: number | null) {
     lastPlayedIdRef.current = triggerId;
     playChime();
   }, [playChime, triggerId]);
+}
+
+function useAudioUnlock() {
+  useEffect(() => {
+    const unlock = () => unlockSharedAudio();
+    const options = { passive: true };
+
+    window.addEventListener("pointerdown", unlock, options);
+    window.addEventListener("touchstart", unlock, options);
+    window.addEventListener("keydown", unlock);
+
+    return () => {
+      window.removeEventListener("pointerdown", unlock);
+      window.removeEventListener("touchstart", unlock);
+      window.removeEventListener("keydown", unlock);
+    };
+  }, []);
 }
 
 function useThemeMode() {
@@ -866,6 +910,7 @@ function App() {
   const currentRisk = currentDecision.risk;
   const isClosedAlert = isClosedEyeStatus(currentDecision.status);
   const yawnChimeTriggerId = toast?.status && isYawningStatus(toast.status) ? toast.id : null;
+  useAudioUnlock();
   useSirenAlarm(isClosedAlert);
   useYawnChime(yawnChimeTriggerId);
 

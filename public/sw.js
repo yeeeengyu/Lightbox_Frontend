@@ -1,4 +1,4 @@
-const CACHE_NAME = "lightbox-webapp-v1";
+const CACHE_NAME = "lightbox-webapp-v2";
 const APP_SHELL = ["/", "/manifest.webmanifest", "/icon.svg"];
 
 self.addEventListener("install", (event) => {
@@ -15,16 +15,29 @@ self.addEventListener("activate", (event) => {
   self.clients.claim();
 });
 
+self.addEventListener("message", (event) => {
+  if (event.data?.type === "SKIP_WAITING") {
+    self.skipWaiting();
+  }
+});
+
 self.addEventListener("fetch", (event) => {
   if (event.request.method !== "GET") {
     return;
   }
 
+  const request = event.request.mode === "navigate"
+    ? new Request(event.request, { cache: "no-store" })
+    : event.request;
+
   event.respondWith(
-    fetch(event.request)
+    fetch(request)
       .then((response) => {
-        const copy = response.clone();
-        caches.open(CACHE_NAME).then((cache) => cache.put(event.request, copy));
+        if (response.ok && event.request.url.startsWith(self.location.origin)) {
+          const copy = response.clone();
+          caches.open(CACHE_NAME).then((cache) => cache.put(event.request, copy));
+        }
+
         return response;
       })
       .catch(() => caches.match(event.request).then((cached) => cached || caches.match("/")))
