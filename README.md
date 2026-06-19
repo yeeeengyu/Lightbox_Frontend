@@ -48,9 +48,11 @@ wss://spoti.ingyuc.click/ws/yawn
 ```bash
 VITE_DROWSINESS_WS_URL=ws://localhost:8001/ws/keypoints
 VITE_YAWN_WS_URL=ws://localhost:8001/ws/yawn
+VITE_YAWN_FRAME_INTERVAL_MS=1500
 ```
 
 프론트는 좌우 눈 6개 포인트를 추출해서 약 250ms 간격으로 보냅니다.
+하품 감지 WebSocket에는 카메라 프레임을 긴 변 480px 이하의 JPEG 바이너리로 약 1500ms 간격으로 보냅니다.
 
 ```json
 {

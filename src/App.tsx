@@ -1,19 +1,16 @@
 import {
   AlertTriangle,
   Bell,
-  Camera,
+  ChevronDown,
+  ChevronUp,
   CheckCircle2,
   CircleGauge,
   Clock3,
   Moon,
   Radio,
-  ScanFace,
-  ShieldAlert,
   Sun,
   Video,
   Volume2,
-  Wifi,
-  WifiOff
 } from "lucide-react";
 import { FaceLandmarker, FilesetResolver } from "@mediapipe/tasks-vision";
 import type { ReactNode, RefObject } from "react";
@@ -34,7 +31,6 @@ type EyePayload = {
 
 type DetectionEvent = {
   id: number;
-  time: string;
   label: string;
   level: AlertLevel;
   risk: number;
@@ -59,6 +55,9 @@ type ServerDecision = {
 const DROWSINESS_WS_URL =
   import.meta.env.VITE_DROWSINESS_WS_URL ?? "wss://spoti.ingyuc.click/ws/keypoints";
 const YAWN_WS_URL = import.meta.env.VITE_YAWN_WS_URL ?? "wss://spoti.ingyuc.click/ws/yawn";
+const YAWN_FRAME_INTERVAL_MS = Math.max(1000, Number(import.meta.env.VITE_YAWN_FRAME_INTERVAL_MS) || 1500);
+const YAWN_FRAME_MAX_WIDTH = 480;
+const YAWN_FRAME_QUALITY = 0.75;
 const MEDIAPIPE_WASM_URL =
   import.meta.env.VITE_MEDIAPIPE_WASM_URL ?? "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.21/wasm";
 const FACE_LANDMARKER_MODEL_URL =
@@ -85,13 +84,6 @@ const levelText: Record<AlertLevel, string> = {
   danger: "위험"
 };
 
-const connectionText: Record<ConnectionStatus, string> = {
-  connecting: "서버 연결 중",
-  connected: "서버 연결됨",
-  disconnected: "서버 연결 끊김",
-  error: "서버 연결 오류"
-};
-
 const levelDescription: Record<AlertLevel, string> = {
   normal: "운전자 상태가 안정적입니다.",
   warning: "졸음 징후가 감지되고 있습니다.",
@@ -108,15 +100,6 @@ function normalizeWsUrl(url: string) {
   }
 
   return url;
-}
-
-function formatTime(date: Date) {
-  return new Intl.DateTimeFormat("ko-KR", {
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-    hour12: false
-  }).format(date);
 }
 
 function formatMinute(date: Date) {
@@ -177,6 +160,64 @@ function isYawningStatus(status?: string) {
   return status === "YAWN" || status === "YAWNING";
 }
 
+function isYawningLabel(value: unknown) {
+  if (typeof value !== "string") {
+    return false;
+  }
+
+  const normalized = value.trim().toUpperCase();
+  return isYawningStatus(normalized) || normalized === "하품";
+}
+
+function findYawnDetection(value: unknown) {
+  if (!Array.isArray(value)) {
+    return null;
+  }
+
+  for (const detection of value) {
+    if (!detection || typeof detection !== "object") {
+      continue;
+    }
+
+    const data = detection as Record<string, unknown>;
+    const label = data.label ?? data.class ?? data.name ?? data.event;
+
+    if (isYawningLabel(label)) {
+      return {
+        label: String(label),
+        confidence: data.confidence ?? data.score ?? data.probability
+      };
+    }
+  }
+
+  return null;
+}
+
+function captureVideoJpeg(video: HTMLVideoElement, canvas: HTMLCanvasElement) {
+  if (
+    video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA ||
+    video.videoWidth === 0 ||
+    video.videoHeight === 0
+  ) {
+    return Promise.resolve(null);
+  }
+
+  const scale = Math.min(1, YAWN_FRAME_MAX_WIDTH / video.videoWidth);
+  canvas.width = Math.round(video.videoWidth * scale);
+  canvas.height = Math.round(video.videoHeight * scale);
+
+  const context = canvas.getContext("2d");
+  if (!context) {
+    return Promise.resolve(null);
+  }
+
+  context.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+  return new Promise<Blob | null>((resolve) => {
+    canvas.toBlob(resolve, "image/jpeg", YAWN_FRAME_QUALITY);
+  });
+}
+
 function calculateStatusRisk(status: string | undefined, ear: number | undefined, earSmooth: number | undefined): number {
   const earValue = earSmooth ?? ear;
 
@@ -211,11 +252,18 @@ function parseServerDecision(raw: unknown): ServerDecision | null {
   }
 
   const data = raw as Record<string, unknown>;
-  const statusValue = data.yawning === true ? "YAWNING" : data.status ?? data.state ?? data.label ?? data.event ?? data.class;
+  const yawnDetection = findYawnDetection(data.detections);
+  const hasYawnBoolean =
+    data.yawning === true || data.is_yawning === true || data.isYawning === true || data.yawn === true;
+  const statusValue =
+    hasYawnBoolean || yawnDetection
+      ? "YAWNING"
+      : data.status ?? data.state ?? data.label ?? data.event ?? data.class;
   const status = typeof statusValue === "string" ? statusValue.toUpperCase() : undefined;
   const ear = typeof data.ear === "number" ? data.ear : undefined;
   const earSmooth = typeof data.ear_smooth === "number" ? data.ear_smooth : undefined;
-  const yawnConfidence = typeof data.yawn_confidence === "number" ? data.yawn_confidence : undefined;
+  const rawYawnConfidence = data.yawn_confidence ?? data.yawnConfidence ?? data.confidence ?? yawnDetection?.confidence;
+  const yawnConfidence = typeof rawYawnConfidence === "number" ? rawYawnConfidence : undefined;
   const isClosed = isClosedEyeStatus(status);
   const isYawning = isYawningStatus(status);
   const risk = clampRisk(
@@ -371,9 +419,13 @@ function useDrowsinessSocket(onDecision: (decision: ServerDecision) => void) {
   return { connectionStatus, sendEyePayload, wsUrl };
 }
 
-function useYawnSocket(onDecision: (decision: ServerDecision) => void) {
+function useYawnSocket(
+  videoRef: RefObject<HTMLVideoElement | null>,
+  onDecision: (decision: ServerDecision) => void
+) {
   const socketRef = useRef<WebSocket | null>(null);
   const reconnectTimerRef = useRef<number | null>(null);
+  const isSendingFrameRef = useRef(false);
   const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>("connecting");
   const wsUrl = useMemo(() => normalizeWsUrl(YAWN_WS_URL), []);
 
@@ -431,6 +483,46 @@ function useYawnSocket(onDecision: (decision: ServerDecision) => void) {
       socketRef.current?.close();
     };
   }, [onDecision, wsUrl]);
+
+  useEffect(() => {
+    const canvas = document.createElement("canvas");
+    let isCancelled = false;
+
+    async function sendYawnFrame() {
+      const socket = socketRef.current;
+      const video = videoRef.current;
+
+      if (
+        isCancelled ||
+        isSendingFrameRef.current ||
+        !video ||
+        !socket ||
+        socket.readyState !== WebSocket.OPEN
+      ) {
+        return;
+      }
+
+      isSendingFrameRef.current = true;
+
+      try {
+        const frame = await captureVideoJpeg(video, canvas);
+
+        if (!isCancelled && frame && socket.readyState === WebSocket.OPEN) {
+          socket.send(frame);
+        }
+      } finally {
+        isSendingFrameRef.current = false;
+      }
+    }
+
+    const interval = window.setInterval(sendYawnFrame, YAWN_FRAME_INTERVAL_MS);
+    void sendYawnFrame();
+
+    return () => {
+      isCancelled = true;
+      window.clearInterval(interval);
+    };
+  }, [videoRef]);
 
   return { connectionStatus, wsUrl };
 }
@@ -636,9 +728,21 @@ function useThemeMode() {
 function App() {
   const { videoRef, cameraStatus } = useCameraPreview();
   const { isDarkMode, setIsDarkMode } = useThemeMode();
-  const showDiagnostics = import.meta.env.DEV;
   const lastAlertAtRef = useRef(0);
-  const [events, setEvents] = useState<DetectionEvent[]>([]);
+  const [isSummaryOpen, setIsSummaryOpen] = useState(() => {
+    if (typeof window === "undefined") {
+      return true;
+    }
+
+    return window.localStorage.getItem("lightbox-summary") !== "collapsed";
+  });
+  const [isChartOpen, setIsChartOpen] = useState(() => {
+    if (typeof window === "undefined") {
+      return true;
+    }
+
+    return window.localStorage.getItem("lightbox-chart") !== "collapsed";
+  });
   const [frequency, setFrequency] = useState<FrequencyPoint[]>(emptyFrequency);
   const [toast, setToast] = useState<DetectionEvent | null>(null);
   const [currentDecision, setCurrentDecision] = useState<ServerDecision>({
@@ -664,13 +768,11 @@ function App() {
     lastAlertAtRef.current = now;
     const event: DetectionEvent = {
       id: now,
-      time: formatTime(new Date(now)),
       label: decision.message,
       level: decision.level,
       risk: decision.risk
     };
 
-    setEvents((current) => [event, ...current].slice(0, 8));
     setToast(event);
     setFrequency((current) => {
       const label = formatMinute(new Date(now));
@@ -686,9 +788,9 @@ function App() {
     });
   }, []);
 
-  const { connectionStatus, sendEyePayload, wsUrl } = useDrowsinessSocket(handleDecision);
-  const { connectionStatus: yawnConnectionStatus, wsUrl: yawnWsUrl } = useYawnSocket(handleDecision);
-  const { mediapipeStatus, eyePreview } = useEyeLandmarks(videoRef, sendEyePayload);
+  const { sendEyePayload } = useDrowsinessSocket(handleDecision);
+  useYawnSocket(videoRef, handleDecision);
+  useEyeLandmarks(videoRef, sendEyePayload);
 
   const totalEvents = frequency.reduce((sum, point) => sum + point.count, 0);
   const currentLevel = currentDecision.level;
@@ -713,6 +815,14 @@ function App() {
     return () => window.clearTimeout(timeout);
   }, [toast]);
 
+  useEffect(() => {
+    window.localStorage.setItem("lightbox-summary", isSummaryOpen ? "expanded" : "collapsed");
+  }, [isSummaryOpen]);
+
+  useEffect(() => {
+    window.localStorage.setItem("lightbox-chart", isChartOpen ? "expanded" : "collapsed");
+  }, [isChartOpen]);
+
   return (
     <main className="dashboard">
       <section className="topbar" aria-label="대시보드 요약">
@@ -721,6 +831,17 @@ function App() {
           <h1>졸음운전 감지 대시보드</h1>
         </div>
         <div className="top-actions">
+          <button
+            className="summary-toggle"
+            type="button"
+            onClick={() => setIsSummaryOpen((current) => !current)}
+            aria-controls="summary-panel"
+            aria-expanded={isSummaryOpen}
+            title={isSummaryOpen ? "상단 지표 접기" : "상단 지표 펼치기"}
+          >
+            {isSummaryOpen ? <ChevronUp size={18} /> : <ChevronDown size={18} />}
+            <span>{isSummaryOpen ? "지표 접기" : "지표 펼치기"}</span>
+          </button>
           <button
             className="theme-toggle"
             type="button"
@@ -737,35 +858,23 @@ function App() {
         </div>
       </section>
 
-      <section className="summary-grid" aria-label="실시간 지표">
-        <MetricCard icon={<CircleGauge />} label="현재 위험도" value={`${currentRisk}%`} tone={currentLevel} />
-        <MetricCard icon={<Bell />} label="감지 이벤트" value={`${totalEvents}회`} tone="neutral" />
-        <MetricCard icon={<Clock3 />} label="평균 빈도" value={`${averageFrequency}회/구간`} tone="neutral" />
-        <MetricCard
-          icon={<CircleGauge />}
-          label="EAR"
-          value={currentDecision.earSmooth?.toFixed(3) ?? currentDecision.ear?.toFixed(3) ?? "-"}
-          tone="neutral"
-        />
-        {showDiagnostics && (
-          <>
-            <MetricCard icon={<Camera />} label="카메라 상태" value={cameraStatus} tone="neutral" />
-            <MetricCard
-              icon={connectionStatus === "connected" ? <Wifi /> : <WifiOff />}
-              label="WebSocket"
-              value={connectionText[connectionStatus]}
-              tone={connectionStatus === "connected" ? "normal" : connectionStatus === "error" ? "danger" : "neutral"}
-            />
-            <MetricCard
-              icon={yawnConnectionStatus === "connected" ? <Wifi /> : <WifiOff />}
-              label="하품 소켓"
-              value={connectionText[yawnConnectionStatus]}
-              tone={yawnConnectionStatus === "connected" ? "normal" : yawnConnectionStatus === "error" ? "danger" : "neutral"}
-            />
-            <MetricCard icon={<ScanFace />} label="눈 포인트" value={mediapipeStatus} tone="neutral" />
-          </>
-        )}
-      </section>
+      <div
+        className={`summary-collapse ${isSummaryOpen ? "open" : "closed"}`}
+        id="summary-panel"
+        aria-hidden={!isSummaryOpen}
+      >
+        <section className="summary-grid" aria-label="실시간 지표">
+          <MetricCard icon={<CircleGauge />} label="현재 위험도" value={`${currentRisk}%`} tone={currentLevel} />
+          <MetricCard icon={<Bell />} label="감지 이벤트" value={`${totalEvents}회`} tone="neutral" />
+          <MetricCard icon={<Clock3 />} label="평균 빈도" value={`${averageFrequency}회/구간`} tone="neutral" />
+          <MetricCard
+            icon={<CircleGauge />}
+            label="EAR"
+            value={currentDecision.earSmooth?.toFixed(3) ?? currentDecision.ear?.toFixed(3) ?? "-"}
+            tone="neutral"
+          />
+        </section>
+      </div>
 
       <section className="content-grid">
         <div className="camera-panel">
@@ -795,35 +904,6 @@ function App() {
           </div>
         </div>
 
-        <aside className="alert-panel" aria-label="알림 로그">
-          <div className="section-heading compact">
-            <div>
-              <p className="eyebrow">Alerts</p>
-              <h2>최근 알림</h2>
-            </div>
-          </div>
-
-          <div className="event-list">
-            {events.length === 0 && (
-              <article className="event-empty">
-                <CheckCircle2 size={20} />
-                <span>{currentDecision.message}</span>
-              </article>
-            )}
-
-            {events.map((event) => (
-              <article className={`event-item ${event.level}`} key={event.id}>
-                <div className="event-icon">
-                  {event.level === "danger" ? <ShieldAlert size={18} /> : <AlertTriangle size={18} />}
-                </div>
-                <div>
-                  <strong>{event.label}</strong>
-                  <span>{event.time} · 위험도 {event.risk}%</span>
-                </div>
-              </article>
-            ))}
-          </div>
-        </aside>
       </section>
 
       <section className="chart-panel" aria-label="졸음 감지 빈도 그래프">
@@ -832,31 +912,29 @@ function App() {
             <p className="eyebrow">Detection Frequency</p>
             <h2>졸음 감지 빈도</h2>
           </div>
-          <span className="chart-summary">최근 {frequency.length}개 구간</span>
+          <div className="chart-actions">
+            <span className="chart-summary">최근 {frequency.length}개 구간</span>
+            <button
+              className="panel-toggle"
+              type="button"
+              onClick={() => setIsChartOpen((current) => !current)}
+              aria-controls="frequency-chart-panel"
+              aria-expanded={isChartOpen}
+              title={isChartOpen ? "그래프 접기" : "그래프 펼치기"}
+            >
+              {isChartOpen ? <ChevronUp size={18} /> : <ChevronDown size={18} />}
+              <span>{isChartOpen ? "접기" : "펼치기"}</span>
+            </button>
+          </div>
         </div>
-        <FrequencyChart data={frequency} />
+        <div
+          className={`chart-collapse ${isChartOpen ? "open" : "closed"}`}
+          id="frequency-chart-panel"
+          aria-hidden={!isChartOpen}
+        >
+          <FrequencyChart data={frequency} />
+        </div>
       </section>
-
-      {showDiagnostics && (
-        <section className="payload-panel" aria-label="서버 송신 정보">
-          <div>
-            <p className="eyebrow">Server Endpoint</p>
-            <strong>{wsUrl}</strong>
-          </div>
-          <div>
-            <p className="eyebrow">Yawn Endpoint</p>
-            <strong>{yawnWsUrl}</strong>
-          </div>
-          <div>
-            <p className="eyebrow">Eye Points</p>
-            <strong>좌/우 눈 각 6포인트 · {eyePreview ? "송신 중" : "얼굴 대기 중"}</strong>
-          </div>
-          <div>
-            <p className="eyebrow">Server Status</p>
-            <strong>{currentDecision.status ?? "WAITING"}</strong>
-          </div>
-        </section>
-      )}
 
       {isClosedAlert && (
         <div className="closed-alarm" role="alert" aria-live="assertive">
