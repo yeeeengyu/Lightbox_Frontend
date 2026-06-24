@@ -104,9 +104,10 @@ type MeResponse = {
   user: AuthUser;
 };
 
+const DEFAULT_API_BASE_URL = import.meta.env.DEV ? "" : "https://spoti.ingyuc.click";
+const configuredApiBaseUrl = (import.meta.env.VITE_API_BASE_URL ?? "").trim();
 const API_BASE_URL = (
-  import.meta.env.VITE_API_BASE_URL ||
-  (import.meta.env.DEV ? "" : "https://spoti.ingyuc.click")
+  configuredApiBaseUrl && configuredApiBaseUrl !== "/" ? configuredApiBaseUrl : DEFAULT_API_BASE_URL
 ).replace(/\/$/, "");
 const USERNAME_PATTERN = /^[A-Za-z0-9_.-]{3,32}$/;
 const DROWSINESS_WS_URL =
