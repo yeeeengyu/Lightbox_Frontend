@@ -394,6 +394,21 @@ function normalizeWsUrl(url: string) {
   return url;
 }
 
+function withWebSocketToken(url: string, token?: string) {
+  if (!token) {
+    return url;
+  }
+
+  try {
+    const authenticatedUrl = new URL(url, window.location.href);
+    authenticatedUrl.searchParams.set("token", token);
+    return authenticatedUrl.toString();
+  } catch {
+    const separator = url.includes("?") ? "&" : "?";
+    return `${url}${separator}token=${encodeURIComponent(token)}`;
+  }
+}
+
 function getBrowserName(userAgent: string) {
   if (/Edg\//.test(userAgent)) {
     return "Edge";
@@ -764,11 +779,11 @@ function useCameraPreview() {
   return { videoRef, cameraStatus };
 }
 
-function useDrowsinessSocket(onDecision: (decision: ServerDecision) => void) {
+function useDrowsinessSocket(onDecision: (decision: ServerDecision) => void, token?: string) {
   const socketRef = useRef<WebSocket | null>(null);
   const reconnectTimerRef = useRef<number | null>(null);
   const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>("connecting");
-  const wsUrl = useMemo(() => normalizeWsUrl(DROWSINESS_WS_URL), []);
+  const wsUrl = useMemo(() => withWebSocketToken(normalizeWsUrl(DROWSINESS_WS_URL), token), [token]);
 
   useEffect(() => {
     let isClosedByEffect = false;
@@ -832,7 +847,7 @@ function useDrowsinessSocket(onDecision: (decision: ServerDecision) => void) {
     return true;
   }, []);
 
-  return { connectionStatus, sendEyePayload, wsUrl };
+  return { connectionStatus, sendEyePayload };
 }
 
 function useYawnSocket(
@@ -1207,11 +1222,13 @@ function useThemeMode() {
 }
 
 function Dashboard({
+  accessToken,
   isDarkMode,
   onLogout,
   setIsDarkMode,
   user
 }: {
+  accessToken: string;
   isDarkMode: boolean;
   onLogout: () => void;
   setIsDarkMode: (updater: (current: boolean) => boolean) => void;
@@ -1279,7 +1296,7 @@ function Dashboard({
     });
   }, []);
 
-  const { connectionStatus, sendEyePayload } = useDrowsinessSocket(handleDecision);
+  const { connectionStatus, sendEyePayload } = useDrowsinessSocket(handleDecision, accessToken);
   const { connectionStatus: yawnConnectionStatus } = useYawnSocket(videoRef, handleDecision);
   useEyeLandmarks(videoRef, sendEyePayload);
 
@@ -1767,6 +1784,7 @@ function App() {
 
   return (
     <Dashboard
+      accessToken={session.accessToken}
       isDarkMode={isDarkMode}
       onLogout={() => void logout()}
       setIsDarkMode={setIsDarkMode}
