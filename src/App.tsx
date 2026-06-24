@@ -105,9 +105,10 @@ type MeResponse = {
 };
 
 const API_BASE_URL = (
-  import.meta.env.VITE_API_BASE_URL ??
+  import.meta.env.VITE_API_BASE_URL ||
   (import.meta.env.DEV ? "" : "https://spoti.ingyuc.click")
 ).replace(/\/$/, "");
+const USERNAME_PATTERN = /^[A-Za-z0-9_.-]{3,32}$/;
 const DROWSINESS_WS_URL =
   import.meta.env.VITE_DROWSINESS_WS_URL ?? "wss://spoti.ingyuc.click/ws/keypoints";
 const YAWN_WS_URL = import.meta.env.VITE_YAWN_WS_URL ?? "wss://spoti.ingyuc.click/ws/yawn";
@@ -204,6 +205,28 @@ function createAuthSession(response: LoginResponse): AuthSession {
   };
 }
 
+function toFriendlyApiError(message: string) {
+  const normalizedMessage = message.toLowerCase();
+
+  if (normalizedMessage.includes("username must be")) {
+    return "아이디는 영문, 숫자, 점, 하이픈, 밑줄만 사용해 3-32자로 입력해 주세요.";
+  }
+
+  if (normalizedMessage.includes("nickname must be")) {
+    return "닉네임은 2-30자로 입력해 주세요.";
+  }
+
+  if (normalizedMessage.includes("password must be")) {
+    return "비밀번호는 8자 이상으로 입력해 주세요.";
+  }
+
+  if (normalizedMessage.includes("password confirmation")) {
+    return "비밀번호 확인이 일치하지 않습니다.";
+  }
+
+  return message;
+}
+
 async function readApiError(response: Response) {
   try {
     const data = (await response.json()) as { detail?: unknown; message?: unknown };
@@ -214,16 +237,16 @@ async function readApiError(response: Response) {
       );
 
       if (firstError) {
-        return firstError.msg;
+        return toFriendlyApiError(firstError.msg);
       }
     }
 
     if (typeof data.detail === "string") {
-      return data.detail;
+      return toFriendlyApiError(data.detail);
     }
 
     if (typeof data.message === "string") {
-      return data.message;
+      return toFriendlyApiError(data.message);
     }
   } catch {
     // Fall back to status based messages below.
@@ -1543,6 +1566,19 @@ function LoginPage({
     event.preventDefault();
     setError("");
 
+    const trimmedUsername = username.trim();
+    const trimmedNickname = nickname.trim();
+
+    if (!USERNAME_PATTERN.test(trimmedUsername)) {
+      setError("아이디는 영문, 숫자, 점, 하이픈, 밑줄만 사용해 3-32자로 입력해 주세요.");
+      return;
+    }
+
+    if (isSignupMode && (trimmedNickname.length < 2 || trimmedNickname.length > 30)) {
+      setError("닉네임은 2-30자로 입력해 주세요.");
+      return;
+    }
+
     if (isSignupMode && password !== passwordConfirm) {
       setError("비밀번호 확인이 일치하지 않습니다.");
       return;
@@ -1552,11 +1588,11 @@ function LoginPage({
 
     try {
       if (isSignupMode) {
-        await signup(username.trim(), nickname.trim(), password, passwordConfirm);
+        await signup(trimmedUsername, trimmedNickname, password, passwordConfirm);
         return;
       }
 
-      await login(username.trim(), password);
+      await login(trimmedUsername, password);
     } catch (submissionError) {
       setError(submissionError instanceof Error ? submissionError.message : "로그인 요청에 실패했습니다.");
     } finally {
@@ -1643,6 +1679,7 @@ function LoginPage({
               maxLength={32}
               name="username"
               onChange={(event) => setUsername(event.target.value)}
+              pattern="[A-Za-z0-9_.-]{3,32}"
               placeholder="lightbox"
               required
               type="text"
