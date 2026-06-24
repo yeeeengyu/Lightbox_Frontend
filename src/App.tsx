@@ -6,21 +6,27 @@ import {
   CheckCircle2,
   CircleGauge,
   Clock3,
+  LogIn,
+  LogOut,
   Moon,
   Radio,
+  ShieldCheck,
   Sun,
+  UserPlus,
   Video,
   Volume2,
   Wifi,
   WifiOff,
 } from "lucide-react";
 import { FaceLandmarker, FilesetResolver } from "@mediapipe/tasks-vision";
-import type { ReactNode, RefObject } from "react";
+import type { FormEvent, ReactNode, RefObject } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import logoUrl from "../logo.png";
 
 type AlertLevel = "normal" | "warning" | "danger";
 type ConnectionStatus = "connecting" | "connected" | "disconnected" | "error";
+type AuthMode = "login" | "signup";
+type AuthStatus = "checking" | "signedOut" | "signedIn";
 
 type EyePoint = {
   x: number;
@@ -67,6 +73,41 @@ type ServerDecision = {
   yawnConfidence?: number;
 };
 
+type AuthUser = {
+  id: number;
+  username: string;
+  nickname: string;
+};
+
+type AuthSession = {
+  accessToken: string;
+  tokenType: string;
+  expiresAt: string;
+  user: AuthUser;
+};
+
+type LoginResponse = {
+  ok: boolean;
+  access_token: string;
+  token_type: string;
+  expires_at: string;
+  user: AuthUser;
+};
+
+type SignupResponse = {
+  ok: boolean;
+  user: AuthUser;
+};
+
+type MeResponse = {
+  ok: boolean;
+  user: AuthUser;
+};
+
+const API_BASE_URL = (
+  import.meta.env.VITE_API_BASE_URL ??
+  (import.meta.env.DEV ? "" : "https://spoti.ingyuc.click")
+).replace(/\/$/, "");
 const DROWSINESS_WS_URL =
   import.meta.env.VITE_DROWSINESS_WS_URL ?? "wss://spoti.ingyuc.click/ws/keypoints";
 const YAWN_WS_URL = import.meta.env.VITE_YAWN_WS_URL ?? "wss://spoti.ingyuc.click/ws/yawn";
@@ -78,6 +119,7 @@ const MEDIAPIPE_WASM_URL =
 const FACE_LANDMARKER_MODEL_URL =
   import.meta.env.VITE_FACE_LANDMARKER_MODEL_URL ??
   "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/latest/face_landmarker.task";
+const AUTH_STORAGE_KEY = "lightbox-auth-session";
 
 const LEFT_EYE_INDICES = [33, 160, 158, 133, 153, 144];
 const RIGHT_EYE_INDICES = [362, 385, 387, 263, 373, 380];
@@ -106,6 +148,215 @@ const compactConnectionText: Record<ConnectionStatus, string> = {
   disconnected: "끊김",
   error: "오류"
 };
+
+type ApiRequestOptions = RequestInit & {
+  token?: string;
+};
+
+function readStoredAuthSession(): AuthSession | null {
+  if (typeof window === "undefined") {
+    return null;
+  }
+
+  try {
+    const rawSession = window.localStorage.getItem(AUTH_STORAGE_KEY);
+
+    if (!rawSession) {
+      return null;
+    }
+
+    const parsed = JSON.parse(rawSession) as Partial<AuthSession>;
+
+    if (
+      typeof parsed.accessToken !== "string" ||
+      typeof parsed.tokenType !== "string" ||
+      typeof parsed.expiresAt !== "string" ||
+      !parsed.user
+    ) {
+      return null;
+    }
+
+    return parsed as AuthSession;
+  } catch {
+    return null;
+  }
+}
+
+function persistAuthSession(session: AuthSession | null) {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  if (!session) {
+    window.localStorage.removeItem(AUTH_STORAGE_KEY);
+    return;
+  }
+
+  window.localStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(session));
+}
+
+function createAuthSession(response: LoginResponse): AuthSession {
+  return {
+    accessToken: response.access_token,
+    tokenType: response.token_type,
+    expiresAt: response.expires_at,
+    user: response.user
+  };
+}
+
+async function readApiError(response: Response) {
+  try {
+    const data = (await response.json()) as { detail?: unknown; message?: unknown };
+
+    if (Array.isArray(data.detail)) {
+      const firstError = data.detail.find(
+        (item): item is { msg: string } => Boolean(item) && typeof item === "object" && "msg" in item && typeof item.msg === "string"
+      );
+
+      if (firstError) {
+        return firstError.msg;
+      }
+    }
+
+    if (typeof data.detail === "string") {
+      return data.detail;
+    }
+
+    if (typeof data.message === "string") {
+      return data.message;
+    }
+  } catch {
+    // Fall back to status based messages below.
+  }
+
+  if (response.status === 401) {
+    return "아이디 또는 비밀번호를 확인해 주세요.";
+  }
+
+  if (response.status === 409) {
+    return "이미 존재하는 아이디입니다.";
+  }
+
+  return "요청 처리 중 문제가 발생했습니다.";
+}
+
+async function apiRequest<T>(path: string, options: ApiRequestOptions = {}) {
+  const { token, headers, body, ...init } = options;
+  const requestHeaders = new Headers(headers);
+
+  if (body && !requestHeaders.has("Content-Type")) {
+    requestHeaders.set("Content-Type", "application/json");
+  }
+
+  if (token) {
+    requestHeaders.set("Authorization", `Bearer ${token}`);
+  }
+
+  const response = await fetch(`${API_BASE_URL}${path}`, {
+    ...init,
+    body,
+    headers: requestHeaders
+  });
+
+  if (!response.ok) {
+    throw new Error(await readApiError(response));
+  }
+
+  return (await response.json()) as T;
+}
+
+function useAuthSession() {
+  const [session, setSessionState] = useState<AuthSession | null>(() => readStoredAuthSession());
+  const [authStatus, setAuthStatus] = useState<AuthStatus>(() => (readStoredAuthSession() ? "checking" : "signedOut"));
+
+  const setSession = useCallback((nextSession: AuthSession | null) => {
+    persistAuthSession(nextSession);
+    setSessionState(nextSession);
+    setAuthStatus(nextSession ? "signedIn" : "signedOut");
+  }, []);
+
+  useEffect(() => {
+    const token = session?.accessToken;
+
+    if (!token) {
+      setAuthStatus("signedOut");
+      return;
+    }
+
+    let isCancelled = false;
+    setAuthStatus("checking");
+
+    apiRequest<MeResponse>("/auth/me", { token })
+      .then((response) => {
+        if (isCancelled) {
+          return;
+        }
+
+        setSessionState((current) => {
+          if (!current) {
+            return current;
+          }
+
+          const nextSession = { ...current, user: response.user };
+          persistAuthSession(nextSession);
+          return nextSession;
+        });
+        setAuthStatus("signedIn");
+      })
+      .catch(() => {
+        if (!isCancelled) {
+          setSession(null);
+        }
+      });
+
+    return () => {
+      isCancelled = true;
+    };
+  }, [session?.accessToken, setSession]);
+
+  const login = useCallback(
+    async (username: string, password: string) => {
+      const response = await apiRequest<LoginResponse>("/auth/login", {
+        method: "POST",
+        body: JSON.stringify({ username, password })
+      });
+
+      setSession(createAuthSession(response));
+    },
+    [setSession]
+  );
+
+  const signup = useCallback(
+    async (username: string, nickname: string, password: string, passwordConfirm: string) => {
+      await apiRequest<SignupResponse>("/auth/signup", {
+        method: "POST",
+        body: JSON.stringify({ username, nickname, password, passwordConfirm })
+      });
+      await login(username, password);
+    },
+    [login]
+  );
+
+  const logout = useCallback(async () => {
+    const token = session?.accessToken;
+    setSession(null);
+
+    if (!token) {
+      return;
+    }
+
+    try {
+      await apiRequest<{ ok: boolean }>("/auth/logout", {
+        method: "POST",
+        token
+      });
+    } catch {
+      // The local session is already cleared, so a stale server token should not block logout.
+    }
+  }, [session?.accessToken, setSession]);
+
+  return { authStatus, login, logout, session, signup };
+}
 
 function normalizeWsUrl(url: string) {
   if (url.startsWith("https://")) {
@@ -931,9 +1182,18 @@ function useThemeMode() {
   return { isDarkMode, setIsDarkMode };
 }
 
-function App() {
+function Dashboard({
+  isDarkMode,
+  onLogout,
+  setIsDarkMode,
+  user
+}: {
+  isDarkMode: boolean;
+  onLogout: () => void;
+  setIsDarkMode: (updater: (current: boolean) => boolean) => void;
+  user: AuthUser;
+}) {
   const { videoRef, cameraStatus } = useCameraPreview();
-  const { isDarkMode, setIsDarkMode } = useThemeMode();
   const lastAlertAtRef = useRef(0);
   const [isSummaryOpen, setIsSummaryOpen] = useState(() => {
     if (typeof window === "undefined") {
@@ -1063,6 +1323,10 @@ function App() {
           </h1>
         </div>
         <div className="top-actions">
+          <span className="user-badge" title={`${user.nickname}님으로 로그인됨`}>
+            <ShieldCheck size={15} />
+            <span>{user.nickname}</span>
+          </span>
           <SocketStatusBadge label="눈" status={connectionStatus} />
           <SocketStatusBadge label="하품" status={yawnConnectionStatus} />
           <button
@@ -1084,6 +1348,15 @@ function App() {
             title={isDarkMode ? "라이트 모드" : "다크 모드"}
           >
             {isDarkMode ? <Sun size={18} /> : <Moon size={18} />}
+          </button>
+          <button
+            className="theme-toggle"
+            type="button"
+            onClick={onLogout}
+            aria-label="로그아웃"
+            title="로그아웃"
+          >
+            <LogOut size={18} />
           </button>
           <div className={`status-pill ${currentLevel}`}>
             <Radio size={18} />
@@ -1194,6 +1467,273 @@ function App() {
         </div>
       )}
     </main>
+  );
+}
+
+function AuthLoadingPage({
+  isDarkMode,
+  setIsDarkMode
+}: {
+  isDarkMode: boolean;
+  setIsDarkMode: (updater: (current: boolean) => boolean) => void;
+}) {
+  return (
+    <main className="auth-page">
+      <section className="auth-topbar" aria-label="로그인 상단 메뉴">
+        <div className="brand-heading">
+          <h1>
+            <img src={logoUrl} alt="" aria-hidden="true" />
+            <span>LightBox</span>
+          </h1>
+        </div>
+        <button
+          className="theme-toggle"
+          type="button"
+          onClick={() => setIsDarkMode((current) => !current)}
+          aria-label={isDarkMode ? "라이트 모드로 전환" : "다크 모드로 전환"}
+          title={isDarkMode ? "라이트 모드" : "다크 모드"}
+        >
+          {isDarkMode ? <Sun size={18} /> : <Moon size={18} />}
+        </button>
+      </section>
+      <section className="auth-layout auth-layout-centered">
+        <div className="auth-card auth-loading-card" role="status" aria-live="polite">
+          <div className="auth-loading-icon">
+            <ShieldCheck size={22} />
+          </div>
+          <div>
+            <p className="eyebrow">Account</p>
+            <h2>저장된 세션을 확인하는 중입니다.</h2>
+          </div>
+        </div>
+      </section>
+    </main>
+  );
+}
+
+function LoginPage({
+  authStatus,
+  isDarkMode,
+  login,
+  setIsDarkMode,
+  signup
+}: {
+  authStatus: AuthStatus;
+  isDarkMode: boolean;
+  login: (username: string, password: string) => Promise<void>;
+  setIsDarkMode: (updater: (current: boolean) => boolean) => void;
+  signup: (username: string, nickname: string, password: string, passwordConfirm: string) => Promise<void>;
+}) {
+  const [mode, setMode] = useState<AuthMode>("login");
+  const [username, setUsername] = useState("");
+  const [nickname, setNickname] = useState("");
+  const [password, setPassword] = useState("");
+  const [passwordConfirm, setPasswordConfirm] = useState("");
+  const [error, setError] = useState("");
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const isSignupMode = mode === "signup";
+  const isChecking = authStatus === "checking";
+
+  const switchMode = (nextMode: AuthMode) => {
+    setMode(nextMode);
+    setError("");
+  };
+
+  const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setError("");
+
+    if (isSignupMode && password !== passwordConfirm) {
+      setError("비밀번호 확인이 일치하지 않습니다.");
+      return;
+    }
+
+    setIsSubmitting(true);
+
+    try {
+      if (isSignupMode) {
+        await signup(username.trim(), nickname.trim(), password, passwordConfirm);
+        return;
+      }
+
+      await login(username.trim(), password);
+    } catch (submissionError) {
+      setError(submissionError instanceof Error ? submissionError.message : "로그인 요청에 실패했습니다.");
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  return (
+    <main className="auth-page">
+      <section className="auth-topbar" aria-label="로그인 상단 메뉴">
+        <div className="brand-heading">
+          <h1>
+            <img src={logoUrl} alt="" aria-hidden="true" />
+            <span>LightBox</span>
+          </h1>
+        </div>
+        <button
+          className="theme-toggle"
+          type="button"
+          onClick={() => setIsDarkMode((current) => !current)}
+          aria-label={isDarkMode ? "라이트 모드로 전환" : "다크 모드로 전환"}
+          title={isDarkMode ? "라이트 모드" : "다크 모드"}
+        >
+          {isDarkMode ? <Sun size={18} /> : <Moon size={18} />}
+        </button>
+      </section>
+
+      <section className="auth-layout">
+        <div className="auth-copy">
+          <p className="eyebrow">Driver Safety Console</p>
+          <h2>운전자 상태를 로그인 후 바로 모니터링하세요.</h2>
+          <p>
+            서버 인증 토큰으로 세션을 유지하고, LightBox 대시보드에서 눈 감김과 하품 감지 상태를 이어서 확인합니다.
+          </p>
+          <div className="auth-feature-grid" aria-label="인증 기능 요약">
+            <span>
+              <ShieldCheck size={16} /> 토큰 세션
+            </span>
+            <span>
+              <Video size={16} /> 실시간 카메라
+            </span>
+            <span>
+              <Bell size={16} /> 위험 알림
+            </span>
+          </div>
+        </div>
+
+        <form className="auth-card" onSubmit={handleSubmit}>
+          <div className="auth-card-heading">
+            <div>
+              <p className="eyebrow">Account</p>
+              <h2>{isSignupMode ? "회원가입" : "로그인"}</h2>
+            </div>
+            <div className="auth-mode-toggle" role="tablist" aria-label="인증 방식">
+              <button
+                type="button"
+                className={mode === "login" ? "active" : ""}
+                onClick={() => switchMode("login")}
+                role="tab"
+                aria-selected={mode === "login"}
+              >
+                로그인
+              </button>
+              <button
+                type="button"
+                className={mode === "signup" ? "active" : ""}
+                onClick={() => switchMode("signup")}
+                role="tab"
+                aria-selected={mode === "signup"}
+              >
+                가입
+              </button>
+            </div>
+          </div>
+
+          {isChecking && <div className="auth-message">저장된 세션을 확인하는 중입니다.</div>}
+          {error && <div className="auth-message error">{error}</div>}
+
+          <label className="auth-field">
+            <span>아이디</span>
+            <input
+              autoComplete="username"
+              minLength={3}
+              maxLength={32}
+              name="username"
+              onChange={(event) => setUsername(event.target.value)}
+              placeholder="lightbox"
+              required
+              type="text"
+              value={username}
+            />
+          </label>
+
+          {isSignupMode && (
+            <label className="auth-field">
+              <span>닉네임</span>
+              <input
+                autoComplete="nickname"
+                minLength={2}
+                maxLength={30}
+                name="nickname"
+                onChange={(event) => setNickname(event.target.value)}
+                placeholder="운전자"
+                required
+                type="text"
+                value={nickname}
+              />
+            </label>
+          )}
+
+          <label className="auth-field">
+            <span>비밀번호</span>
+            <input
+              autoComplete={isSignupMode ? "new-password" : "current-password"}
+              minLength={8}
+              name="password"
+              onChange={(event) => setPassword(event.target.value)}
+              placeholder="8자 이상"
+              required
+              type="password"
+              value={password}
+            />
+          </label>
+
+          {isSignupMode && (
+            <label className="auth-field">
+              <span>비밀번호 확인</span>
+              <input
+                autoComplete="new-password"
+                minLength={8}
+                name="passwordConfirm"
+                onChange={(event) => setPasswordConfirm(event.target.value)}
+                placeholder="비밀번호 재입력"
+                required
+                type="password"
+                value={passwordConfirm}
+              />
+            </label>
+          )}
+
+          <button className="auth-submit" disabled={isSubmitting || isChecking} type="submit">
+            {isSignupMode ? <UserPlus size={18} /> : <LogIn size={18} />}
+            {isSubmitting ? "처리 중" : isSignupMode ? "가입하고 시작" : "로그인하고 시작"}
+          </button>
+        </form>
+      </section>
+    </main>
+  );
+}
+
+function App() {
+  const { isDarkMode, setIsDarkMode } = useThemeMode();
+  const { authStatus, login, logout, session, signup } = useAuthSession();
+
+  if (authStatus === "checking") {
+    return <AuthLoadingPage isDarkMode={isDarkMode} setIsDarkMode={setIsDarkMode} />;
+  }
+
+  if (!session) {
+    return (
+      <LoginPage
+        authStatus={authStatus}
+        isDarkMode={isDarkMode}
+        login={login}
+        setIsDarkMode={setIsDarkMode}
+        signup={signup}
+      />
+    );
+  }
+
+  return (
+    <Dashboard
+      isDarkMode={isDarkMode}
+      onLogout={() => void logout()}
+      setIsDarkMode={setIsDarkMode}
+      user={session.user}
+    />
   );
 }
 
