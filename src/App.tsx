@@ -21,7 +21,7 @@ import {
 import { FaceLandmarker, FilesetResolver } from "@mediapipe/tasks-vision";
 import type { FormEvent, ReactNode, RefObject } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import logoUrl from "../logo.png";
+import logoUrl from "../logo.svg";
 
 type AlertLevel = "normal" | "warning" | "danger";
 type ConnectionStatus = "connecting" | "connected" | "disconnected" | "error";
@@ -1544,7 +1544,7 @@ function AuthLoadingPage({
           </div>
           <div>
             <p className="eyebrow">Account</p>
-            <h2>저장된 세션을 확인하는 중입니다.</h2>
+            <h2>대시보드를 준비하는 중입니다.</h2>
           </div>
         </div>
       </section>
@@ -1640,20 +1640,21 @@ function LoginPage({
 
       <section className="auth-layout">
         <div className="auth-copy">
-          <p className="eyebrow">Driver Safety Console</p>
-          <h2>운전자 상태를 로그인 후 바로 모니터링하세요.</h2>
+          <h2>눈꺼풀이 무거워지는 순간, LightBox가 먼저 알립니다.</h2>
           <p>
-            서버 인증 토큰으로 세션을 유지하고, LightBox 대시보드에서 눈 감김과 하품 감지 상태를 이어서 확인합니다.
+            카메라로 눈 감김과 하품 신호를 읽고 위험도를 실시간으로 보여줍니다.
+            <br />
+            운전자는 화면만 켜두고, 위험 신호는 알림과 기록으로 남깁니다.
           </p>
           <div className="auth-feature-grid" aria-label="인증 기능 요약">
             <span>
-              <ShieldCheck size={16} /> 토큰 세션
+              <ShieldCheck size={16} /> 안전 세션
             </span>
             <span>
-              <Video size={16} /> 실시간 카메라
+              <Video size={16} /> 눈 감김 추적
             </span>
             <span>
-              <Bell size={16} /> 위험 알림
+              <Bell size={16} /> 즉시 알림
             </span>
           </div>
         </div>
@@ -1661,8 +1662,8 @@ function LoginPage({
         <form className="auth-card" onSubmit={handleSubmit}>
           <div className="auth-card-heading">
             <div>
-              <p className="eyebrow">Account</p>
-              <h2>{isSignupMode ? "회원가입" : "로그인"}</h2>
+              <p className="eyebrow">Secure Access</p>
+              <h2>{isSignupMode ? "새 운전자 등록" : "대시보드 접속"}</h2>
             </div>
             <div className="auth-mode-toggle" role="tablist" aria-label="인증 방식">
               <button
@@ -1686,7 +1687,7 @@ function LoginPage({
             </div>
           </div>
 
-          {isChecking && <div className="auth-message">저장된 세션을 확인하는 중입니다.</div>}
+          {isChecking && <div className="auth-message">이전 접속 정보를 확인하는 중입니다.</div>}
           {error && <div className="auth-message error">{error}</div>}
 
           <label className="auth-field">
@@ -1754,7 +1755,7 @@ function LoginPage({
 
           <button className="auth-submit" disabled={isSubmitting || isChecking} type="submit">
             {isSignupMode ? <UserPlus size={18} /> : <LogIn size={18} />}
-            {isSubmitting ? "처리 중" : isSignupMode ? "가입하고 시작" : "로그인하고 시작"}
+            {isSubmitting ? "처리 중" : isSignupMode ? "등록하고 시작" : "대시보드 열기"}
           </button>
         </form>
       </section>
